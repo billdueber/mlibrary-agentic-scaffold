@@ -59,6 +59,7 @@ Load a skill when the work matches its description:
 |-------|-------------|
 | `adr-create` | Creating a new Architecture Decision Record |
 | `worth-it` | Assess effort and value before acting; wait for go-ahead before making changes |
+| `preserve-findings` | Triage Loom records on the current branch and land keepers to main; use when abandoning a spike or checkpointing knowledge mid-branch |
 | `ss` | Self-sufficient execution mode: complete a task autonomously |
 | `loom-*` | Any Loom workflow (bootstrap, tickets, wiki, critique, Ralph, etc.) |
 

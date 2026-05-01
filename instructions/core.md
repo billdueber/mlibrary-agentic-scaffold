@@ -142,6 +142,12 @@ the description: `feat(parser): support unicode identifiers` beats `feat: update
 report any uncommitted changes as a short list. Do not stage or commit
 autonomously. The reminder is enough.
 
+**Agent rule**: When working on a feature or spike branch, valuable research,
+decisions, and evidence may need to survive regardless of whether the branch is
+merged or abandoned. When the user wants to checkpoint knowledge back to `main`
+before it is lost, load the `preserve-findings` skill. This applies mid-spike,
+at abandonment, and before opening a PR.
+
 ---
 
 ## GPG Commit Signing
