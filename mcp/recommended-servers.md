@@ -214,7 +214,7 @@ now cloud-only for MCP. Requires a free or paid API key from `app.mem0.ai`.
 
 ```json
 "mem0": {
-  "type": "http",
+  "type": "remote",
   "url": "https://mcp.mem0.ai/mcp",
   "headers": {
     "Authorization": "Bearer ${MEM0_API_KEY}"

@@ -68,7 +68,7 @@ In your project's `opencode.json`:
 {
   "mcp": {
     "mem0": {
-      "type": "http",
+      "type": "remote",
       "url": "https://mcp.mem0.ai/mcp",
       "headers": {
         "Authorization": "Bearer ${MEM0_API_KEY}"

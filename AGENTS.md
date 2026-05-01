@@ -38,7 +38,7 @@ architectural or policy choices. Key points:
 - **Convention over custom**: StandardRB, RSpec, Keep a Changelog.
   Deviating from convention requires a recorded decision (ADR or Loom decision record).
 - **Skills over prose**: Repeatable workflows are encoded as skills, not prose paragraphs.
-- **Honest uncertainty**: Open gaps go in `OPEN_QUESTIONS.md` and as Loom tickets.
+- **Honest uncertainty**: Open gaps go in Loom tickets (`.loom/tickets/`).
   Never silently resolve a policy gap by guessing.
 
 ---
@@ -47,7 +47,7 @@ architectural or policy choices. Key points:
 
 Before non-trivial edits: check `.loom/tickets/` for existing work, create a ticket if none exists. Instruction changes flow downstream to all projects. Templates must stay in sync with instruction files. Style: write for an AI agent — explicit and imperative; use "Agent rule:" callouts; keep language-specific concerns in `ruby.md`, cross-language in `core.md`.
 
-Small question or gap → `OPEN_QUESTIONS.md` with date. Resolved policy question → Loom decision record in `.loom/constitution/decisions/`. Non-trivial new work → Loom ticket. ADRs for this scaffold live in `docs/adrs/` — use the `adr-create` skill.
+Small question or gap → Loom ticket in `.loom/tickets/` with date. Resolved policy question → Loom decision record in `.loom/constitution/decisions/`. Non-trivial new work → Loom ticket. ADRs for this scaffold live in `docs/adrs/` — use the `adr-create` skill.
 
 ---
 

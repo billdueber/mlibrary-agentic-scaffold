@@ -596,7 +596,7 @@ if ask_yn "  Update $OPENCODE_JSON with approved MCP server entries?" y; then
   PROJECTS_ROOT="$(dirname "${PROJECT_DIR}")"
   MCP_CONFIGS["filesystem"]='{"type":"local","command":["npx","-y","@modelcontextprotocol/server-filesystem","'"${PROJECTS_ROOT}"'","'"${SCAFFOLD_REL}"'"],"enabled":true}'
   MCP_CONFIGS["memory"]='{"type":"local","command":["npx","-y","@modelcontextprotocol/server-memory"],"environment":{"MEMORY_FILE_PATH":"'"${PROJECT_DIR}/memory.jsonl"'"},"enabled":true}'
-  MCP_CONFIGS["mem0"]='{"type":"http","url":"https://mcp.mem0.ai/mcp","headers":{"Authorization":"Bearer ${MEM0_API_KEY}"},"enabled":false}'
+  MCP_CONFIGS["mem0"]='{"type":"remote","url":"https://mcp.mem0.ai/mcp","headers":{"Authorization":"Bearer ${MEM0_API_KEY}"},"enabled":false}'
 
   for name in "${!MCP_APPROVED[@]}"; do
     if [[ -n "${MCP_CONFIGS[$name]:-}" ]]; then

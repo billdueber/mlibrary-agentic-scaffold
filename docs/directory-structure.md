@@ -3,7 +3,6 @@
 ```
 mlibrary-agentic-scaffold/
 ├── README.md                        # Overview and how to use
-├── OPEN_QUESTIONS.md                # Assumptions made; revisit with owner
 ├── opencode.json                    # Project-level MCP config (copy/adapt to your project)
 │
 ├── bin/

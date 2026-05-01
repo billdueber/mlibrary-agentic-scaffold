@@ -137,6 +137,11 @@ the description: `feat(parser): support unicode identifiers` beats `feat: update
 - Version bump commit: `chore(release): bump version to x.y.z`
 - Commits and release tags are GPG-signed
 
+**Agent rule**: At natural transition points — when the user asks "what's next",
+"what's on the agenda", or signals they are wrapping up — run `git status` and
+report any uncommitted changes as a short list. Do not stage or commit
+autonomously. The reminder is enough.
+
 ---
 
 ## GPG Commit Signing

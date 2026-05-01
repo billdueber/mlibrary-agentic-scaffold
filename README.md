@@ -179,6 +179,6 @@ reports what needs attention without making changes automatically.
 This is a living system. Suggested workflow:
 
 1. Notice a recurring pattern or agent failure mode.
-2. Open `OPEN_QUESTIONS.md` and note it.
+2. Open a Loom ticket in `.loom/tickets/` and note it.
 3. Write an instruction or skill to address it.
 4. Update relevant `AGENTS.md` templates and `docs/adrs/` if the decision is architectural.

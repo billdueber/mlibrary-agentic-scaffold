@@ -181,7 +181,7 @@ and offline-first sync.
 
 ### 8. memory-mcp-lite — SQLite + FTS5, Coding-Agent-Focused Schema
 
-Published April 2026. Too new to evaluate. Revisit late June 2026 (see `OPEN_QUESTIONS.md`).
+Published April 2026. Too new to evaluate. Revisit late June 2026 (see `ticket:memory-revisit`).
 
 ---
 

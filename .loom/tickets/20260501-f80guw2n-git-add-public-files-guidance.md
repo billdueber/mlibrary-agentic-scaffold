@@ -1,7 +1,7 @@
 ---
 id: ticket:20260501-f80guw2n-git-add-public-files-guidance
 kind: ticket
-status: proposed
+status: closed
 created_at: 2026-05-01T00:00:00Z
 updated_at: 2026-05-01T00:00:00Z
 title: "Figure out best way to instruct agents to git-add files created outside .loom"

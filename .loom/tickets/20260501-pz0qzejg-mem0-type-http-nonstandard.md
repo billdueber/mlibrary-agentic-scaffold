@@ -1,7 +1,7 @@
 ---
 id: ticket:20260501-pz0qzejg-mem0-type-http-nonstandard
 kind: ticket
-status: proposed
+status: closed
 created_at: 2026-05-01T00:00:00Z
 updated_at: 2026-05-01T00:00:00Z
 title: "mem0 MCP config uses non-standard type: 'http'"

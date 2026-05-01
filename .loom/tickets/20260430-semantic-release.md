@@ -1,7 +1,7 @@
 ---
 id: ticket:semantic-release
 kind: ticket
-status: proposed
+status: cancelled
 change_class: documentation-explanation
 risk_class: low
 created_at: 2026-04-30T00:00:00Z
