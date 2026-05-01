@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# bin/update_mlibrary_scaffold
+#
+# Checks whether the scaffold is up-to-date in the current project:
+#   • Fails fast if bin/initialize_for_opencode was never run
+#   • Symlinks any scaffold skills not yet present in ~/.config/opencode/skills/
+#   • Reports MCP servers in mcp/recommended-servers.md not in opencode.json
+#   • Reports instruction files in the scaffold not in opencode.json instructions[]
+#
+# Usage: cd /path/to/your-project && /path/to/scaffold/bin/update_mlibrary_scaffold
+# Or:    /path/to/scaffold/bin/update_mlibrary_scaffold /path/to/your-project
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Resolve paths
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAFFOLD_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_DIR="${1:-$(pwd)}"
+
+# ---------------------------------------------------------------------------
+# Color helpers
+# ---------------------------------------------------------------------------
+red()    { printf '\033[31m%s\033[0m' "$*"; }
+green()  { printf '\033[32m%s\033[0m' "$*"; }
+yellow() { printf '\033[33m%s\033[0m' "$*"; }
+dim()    { printf '\033[2m%s\033[0m' "$*"; }
+bold()   { printf '\033[1m%s\033[0m' "$*"; }
+
+header() {
+  echo
+  echo "$(bold "── $1 ──────────────────────────────────────────────")"
+  echo
+}
+
+log_ok()   { echo "  $(green "✓") $*"; }
+log_warn() { echo "  $(yellow "!") $*"; }
+log_info() { echo "  $(dim "·") $*"; }
+
+# ---------------------------------------------------------------------------
+# Fail-fast: confirm initialize_for_opencode was run
+# ---------------------------------------------------------------------------
+header "Pre-flight"
+
+AGENTS_FILE="${PROJECT_DIR}/AGENTS.md"
+OPENCODE_JSON="${PROJECT_DIR}/opencode.json"
+OPENCODE_SKILLS_DIR="${HOME}/.config/opencode/skills"
+
+INIT_EVIDENCE=0
+
+# Check 1: AGENTS.md references the scaffold
+if [[ -f "$AGENTS_FILE" ]] && grep -q "mlibrary-agentic-scaffold" "$AGENTS_FILE" 2>/dev/null; then
+  log_ok "AGENTS.md references mlibrary-agentic-scaffold"
+  (( INIT_EVIDENCE++ )) || true
+else
+  log_warn "AGENTS.md does not reference mlibrary-agentic-scaffold"
+fi
+
+# Check 2: opencode.json exists in the project
+if [[ -f "$OPENCODE_JSON" ]]; then
+  log_ok "opencode.json exists"
+  (( INIT_EVIDENCE++ )) || true
+else
+  log_warn "opencode.json not found"
+fi
+
+# Check 3: at least one scaffold skill is symlinked
+SCAFFOLD_FIRST_SKILL="$(ls -d "${SCAFFOLD_DIR}/skills/"*/ 2>/dev/null | head -1)"
+if [[ -n "$SCAFFOLD_FIRST_SKILL" ]]; then
+  FIRST_SKILL_NAME="$(basename "$SCAFFOLD_FIRST_SKILL")"
+  if [[ -L "${OPENCODE_SKILLS_DIR}/${FIRST_SKILL_NAME}" ]]; then
+    log_ok "At least one scaffold skill is symlinked (${FIRST_SKILL_NAME})"
+    (( INIT_EVIDENCE++ )) || true
+  else
+    log_warn "No scaffold skills appear to be symlinked yet"
+  fi
+fi
+
+echo
+
+if (( INIT_EVIDENCE < 2 )); then
+  echo "$(red "Error"): It looks like bin/initialize_for_opencode has not been run for this project."
+  echo
+  echo "  Expected to find at least two of:"
+  echo "    • AGENTS.md referencing mlibrary-agentic-scaffold"
+  echo "    • opencode.json in the project root"
+  echo "    • Scaffold skill symlinks in ~/.config/opencode/skills/"
+  echo
+  echo "  Run first: $(dim "${SCAFFOLD_DIR}/bin/initialize_for_opencode ${PROJECT_DIR}")"
+  exit 1
+fi
+
+log_ok "Initialization confirmed — continuing with update checks"
+
+# ---------------------------------------------------------------------------
+# Skills: symlink any missing skills
+# ---------------------------------------------------------------------------
+header "Skills"
+
+SCAFFOLD_SKILLS_DIR="${SCAFFOLD_DIR}/skills"
+SKILLS_NEW=0
+SKILLS_UPDATED=0
+SKILLS_SKIPPED=0
+
+mkdir -p "$OPENCODE_SKILLS_DIR"
+
+for skill_dir in "${SCAFFOLD_SKILLS_DIR}"/*/; do
+  skill_name="$(basename "$skill_dir")"
+  target="${OPENCODE_SKILLS_DIR}/${skill_name}"
+
+  if [[ -L "$target" ]]; then
+    # Already symlinked — refresh the target (in case scaffold moved)
+    current_target="$(readlink "$target")"
+    if [[ "$current_target" != "$skill_dir" && "$current_target" != "${skill_dir%/}" ]]; then
+      ln -sf "$skill_dir" "$target"
+      log_ok "${skill_name}  $(dim "(symlink updated: ${current_target} → ${skill_dir})")"
+      (( SKILLS_UPDATED++ )) || true
+    else
+      log_info "${skill_name}  $(dim "(symlink current)")"
+    fi
+  elif [[ -e "$target" ]]; then
+    log_warn "${skill_name}  $(dim "(non-symlink exists — skipping)")"
+    (( SKILLS_SKIPPED++ )) || true
+  else
+    ln -sf "$skill_dir" "$target"
+    log_ok "${skill_name}  $(dim "(new symlink created)")"
+    (( SKILLS_NEW++ )) || true
+  fi
+done
+
+echo
+if (( SKILLS_NEW == 0 && SKILLS_UPDATED == 0 )); then
+  log_info "All scaffold skills already symlinked — nothing to do"
+fi
+if (( SKILLS_SKIPPED > 0 )); then
+  echo "  $(yellow "Warning"): ${SKILLS_SKIPPED} skill(s) skipped (non-symlink directories exist)."
+  echo "  Remove or rename the conflicting directories manually if you want the scaffold version."
+fi
+
+# ---------------------------------------------------------------------------
+# MCP servers: report servers in recommended-servers.md not in opencode.json
+# ---------------------------------------------------------------------------
+header "MCP Servers"
+
+RECOMMENDED_MD="${SCAFFOLD_DIR}/mcp/recommended-servers.md"
+
+if ! command -v python3 &>/dev/null; then
+  log_warn "python3 not found — skipping MCP diff"
+elif [[ ! -f "$OPENCODE_JSON" ]]; then
+  log_warn "opencode.json not found — skipping MCP diff"
+elif [[ ! -f "$RECOMMENDED_MD" ]]; then
+  log_warn "mcp/recommended-servers.md not found — skipping MCP diff"
+else
+  # Extract server names from recommended-servers.md headings.
+  # Heading format: ### N. `server-name` — Description
+  # Extract the backtick-quoted identifier from each h2/h3 heading.
+  python3 - <<PYEOF
+import json, re, sys
+
+with open("${OPENCODE_JSON}") as f:
+    try:
+        config = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"  ! opencode.json is not valid JSON: {e}")
+        sys.exit(0)
+
+installed = set(config.get("mcp", {}).keys())
+
+with open("${RECOMMENDED_MD}") as f:
+    content = f.read()
+
+# Extract backtick-quoted server names from h2/h3 headings.
+# Matches: ### N. `server-name` — Description  OR  ## `server-name`
+candidates = re.findall(r'^#{2,3}[^`\n]*`([\w][\w\-\.@/]*)`', content, re.MULTILINE)
+# Also catch @-prefixed scoped packages: ### `@scope/pkg`
+scoped = re.findall(r'^#{2,3}[^`\n]*`(@[\w][\w\-\.@/]*)`', content, re.MULTILINE)
+recommended = set(candidates) | set(scoped)
+
+# Remove generic section headings that happen to be in backticks
+skip = {'n', 'note', 'tip', 'warning', 'important'}
+recommended = {r for r in recommended if r.lower() not in skip}
+
+missing = recommended - installed
+extra = installed - recommended
+
+if not recommended:
+    print("  ! Could not extract server names from recommended-servers.md — check heading format")
+elif not missing:
+    print("  \033[32m✓\033[0m All recommended MCP servers are installed")
+else:
+    print("  \033[33m!\033[0m MCP servers in recommended-servers.md but not in opencode.json:")
+    for s in sorted(missing):
+        print(f"      - {s}")
+    print()
+    print(f"  See: ${RECOMMENDED_MD}")
+
+if extra:
+    print()
+    print("  \033[2m·\033[0m MCP servers in opencode.json not in recommended list (may be intentional):")
+    for s in sorted(extra):
+        print(f"      - {s}")
+PYEOF
+fi
+
+# ---------------------------------------------------------------------------
+# Instructions: report instruction files not in opencode.json instructions[]
+# ---------------------------------------------------------------------------
+header "Instruction Files"
+
+SCAFFOLD_INSTRUCTIONS_DIR="${SCAFFOLD_DIR}/instructions"
+
+if ! command -v python3 &>/dev/null; then
+  log_warn "python3 not found — skipping instructions diff"
+elif [[ ! -f "$OPENCODE_JSON" ]]; then
+  log_warn "opencode.json not found — skipping instructions diff"
+else
+  python3 - <<PYEOF
+import json, os, sys
+
+with open("${OPENCODE_JSON}") as f:
+    try:
+        config = json.load(f)
+    except json.JSONDecodeError:
+        print("  ! opencode.json is not valid JSON — skipping")
+        sys.exit(0)
+
+instructions = config.get("instructions", [])
+
+# Normalize to basenames for comparison
+installed_basenames = set()
+for entry in instructions:
+    if isinstance(entry, str):
+        installed_basenames.add(os.path.basename(entry))
+
+# Scaffold instruction files
+scaffold_files = sorted(
+    f for f in os.listdir("${SCAFFOLD_INSTRUCTIONS_DIR}")
+    if f.endswith(".md")
+)
+
+missing = [f for f in scaffold_files if f not in installed_basenames]
+
+if not missing:
+    print("  $(green "✓") All scaffold instruction files are referenced in opencode.json")
+else:
+    print("  $(yellow "!") Scaffold instruction files not in opencode.json instructions[]:")
+    for f in missing:
+        print(f"      - instructions/{f}")
+    print()
+    print("  These may be intentionally excluded (e.g., ruby.md for a non-Ruby project).")
+    print("  If you want to add one, update the instructions[] array in opencode.json.")
+PYEOF
+fi
+
+# ---------------------------------------------------------------------------
+# Done
+# ---------------------------------------------------------------------------
+header "Done"
+echo "  Update check complete."
+echo
+echo "  To install a new MCP server or instruction file, edit:"
+echo "    $(dim "${PROJECT_DIR}/opencode.json")"
+echo
+echo "  Reference: $(dim "${SCAFFOLD_DIR}/mcp/recommended-servers.md")"
+echo

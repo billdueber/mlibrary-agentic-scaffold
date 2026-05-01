@@ -1,0 +1,962 @@
+#!/usr/bin/env bash
+# initialize_for_opencode [LAYER ...]
+#
+# Sets up a project to use mlibrary-agentic-scaffold with OpenCode.
+# Run from the project root:
+#
+#   cd /my/project
+#   /path/to/mlibrary-agentic-scaffold/bin/initialize_for_opencode
+#   /path/to/mlibrary-agentic-scaffold/bin/initialize_for_opencode ruby
+#   /path/to/mlibrary-agentic-scaffold/bin/initialize_for_opencode ruby docker
+#
+# LAYERS
+#   Pass zero or more layer names as positional arguments.
+#   With no arguments, only the 'core' layer is installed.
+#   Available layers:
+#     ruby    — Ruby gem conventions (ruby.md, testing.md, documentation.md,
+#               changelog-automation.md)
+#     docker  — Docker/Compose integration (docker-integration.md)
+#     ci      — GitHub Actions CI conventions (ci-github-actions.md)
+#     security — Security guidance (security.md, when it exists)
+#
+# Nothing is overwritten without explicit permission.
+# Every existing file that would be replaced is backed up first.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAFFOLD_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_DIR="$(pwd)"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+bold()    { printf '\033[1m%s\033[0m' "$*"; }
+green()   { printf '\033[32m%s\033[0m' "$*"; }
+yellow()  { printf '\033[33m%s\033[0m' "$*"; }
+red()     { printf '\033[31m%s\033[0m' "$*"; }
+dim()     { printf '\033[2m%s\033[0m' "$*"; }
+
+header() {
+  echo
+  echo "$(bold "━━━ $* ━━━")"
+  echo
+}
+
+ask_yn() {
+  # ask_yn "Question text" [default: y|n]
+  local prompt="$1"
+  local default="${2:-n}"
+  local yn_hint
+  if [[ "$default" == "y" ]]; then
+    yn_hint="[Y/n]"
+  else
+    yn_hint="[y/N]"
+  fi
+  while true; do
+    printf '%s %s ' "$prompt" "$(dim "$yn_hint")"
+    read -r reply
+    reply="${reply:-$default}"
+    case "$reply" in
+      [Yy]*) return 0 ;;
+      [Nn]*) return 1 ;;
+      *) echo "  Please enter y or n." ;;
+    esac
+  done
+}
+
+log_skip()    { echo "  $(yellow "skip")   $*"; }
+log_done()    { echo "  $(green  "done")   $*"; }
+log_create()  { echo "  $(green  "create") $*"; }
+log_backup()  { echo "  $(yellow "backup") $*"; }
+log_warn()    { echo "  $(red    "warn")   $*"; }
+
+require_cmd() {
+  if ! command -v "$1" &>/dev/null; then
+    echo "  $(red "missing") Required command not found: $1"
+    echo "           $2"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+detect_os() {
+  case "$(uname -s)" in
+    Darwin*) echo "macos" ;;
+    Linux*)  echo "linux" ;;
+    *)       echo "unknown" ;;
+  esac
+}
+OS="$(detect_os)"
+
+# ---------------------------------------------------------------------------
+# Layer argument parsing
+# ---------------------------------------------------------------------------
+# Each layer maps to one or more instruction files (relative to SCAFFOLD_DIR).
+# 'core' is always included and cannot be excluded.
+# Additional layers are passed as positional arguments.
+#
+# NOTE: This argument parsing is intentionally simple. If layer count or
+# complexity grows further (flags, mutual-exclusion, validation, help text),
+# it is time to rewrite this script in a real language (Ruby, Python, Go)
+# with proper option parsing. See ticket:rewrite-installer-real-language.
+declare -A LAYER_FILES
+LAYER_FILES["core"]="instructions/core.md instructions/adrs.md instructions/agentic-memory.md"
+LAYER_FILES["ruby"]="instructions/ruby.md instructions/testing.md instructions/documentation.md instructions/changelog-automation.md"
+LAYER_FILES["docker"]="instructions/docker-integration.md"
+LAYER_FILES["ci"]="instructions/ci-github-actions.md"
+LAYER_FILES["security"]="instructions/security.md"  # not yet written; silently skipped if absent
+
+REQUESTED_LAYERS=("core")
+for arg in "$@"; do
+  if [[ -n "${LAYER_FILES[$arg]:-}" ]]; then
+    REQUESTED_LAYERS+=("$arg")
+  else
+    echo "$(red "warn") Unknown layer '$arg' — valid layers: ruby docker ci security"
+    echo "       Continuing with known layers only."
+  fi
+done
+
+
+# Order: brew (macOS) → go install (cross-platform) → tell user
+# ---------------------------------------------------------------------------
+install_github_mcp_server() {
+  if [[ "$OS" == "macos" ]] && command -v brew &>/dev/null; then
+    echo "  Running: brew install github-mcp-server"
+    if brew install github-mcp-server &>/dev/null 2>&1; then
+      log_done "github-mcp-server installed via brew"
+      return 0
+    else
+      log_warn "brew install failed — trying go install"
+    fi
+  fi
+
+  if command -v go &>/dev/null; then
+    echo "  Running: go install github.com/github/github-mcp-server/cmd/github-mcp-server@latest"
+    if go install github.com/github/github-mcp-server/cmd/github-mcp-server@latest 2>&1; then
+      log_done "github-mcp-server installed via go install"
+      return 0
+    else
+      log_warn "go install failed"
+    fi
+  fi
+
+  if [[ "$OS" == "linux" ]] && command -v apt-get &>/dev/null; then
+    echo "  $(yellow "note") github-mcp-server is not in apt repositories."
+  fi
+
+  log_warn "Could not install github-mcp-server automatically."
+  echo
+  echo "  Install manually:"
+  echo "    macOS:  brew install github-mcp-server"
+  echo "    Linux:  go install github.com/github/github-mcp-server/cmd/github-mcp-server@latest"
+  echo "    Binary: https://github.com/github/github-mcp-server/releases"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# install_uv
+# Order: brew/apt (platform) → pipx → pip → tell user (never curl|sh)
+# ---------------------------------------------------------------------------
+install_uv() {
+  if [[ "$OS" == "macos" ]] && command -v brew &>/dev/null; then
+    echo "  Running: brew install uv"
+    if brew install uv &>/dev/null 2>&1; then
+      log_done "uv installed via brew"
+      return 0
+    else
+      log_warn "brew install uv failed — trying pipx"
+    fi
+  fi
+
+  if [[ "$OS" == "linux" ]] && command -v apt-get &>/dev/null; then
+    echo "  Trying: apt-get install -y uv"
+    if apt-get install -y uv &>/dev/null 2>&1; then
+      log_done "uv installed via apt"
+      return 0
+    fi
+    # uv is only in apt on Ubuntu 25.04+; silently fall through if not found
+  fi
+
+  if command -v pipx &>/dev/null; then
+    echo "  Running: pipx install uv"
+    if pipx install uv &>/dev/null 2>&1; then
+      log_done "uv installed via pipx"
+      return 0
+    else
+      log_warn "pipx install uv failed — trying pip"
+    fi
+  fi
+
+  if command -v pip3 &>/dev/null || command -v pip &>/dev/null; then
+    local pip_cmd
+    pip_cmd="$(command -v pip3 || command -v pip)"
+    echo "  Running: $pip_cmd install uv"
+    if "$pip_cmd" install uv &>/dev/null 2>&1; then
+      log_done "uv installed via pip"
+      return 0
+    fi
+  fi
+
+  log_warn "Could not install uv automatically."
+  echo
+  echo "  Install manually:"
+  echo "    macOS:  brew install uv"
+  echo "    Linux:  pipx install uv  (or: pip install uv)"
+  echo "    Other:  https://docs.astral.sh/uv/getting-started/installation/"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Merge a JSON snippet into a JSON file (project opencode.json).
+# Adds top-level keys that are missing; never removes or overwrites existing.
+# Requires: node or bun
+# ---------------------------------------------------------------------------
+merge_json() {
+  local target_file="$1"
+  local key="$2"        # top-level key, e.g. "mcp"
+  local subkey="$3"     # nested key under $key, e.g. "context-mode"
+  local value="$4"      # JSON value as a string
+
+  local merge_script
+  merge_script='
+    const fs = require("fs");
+    const file = process.argv[1];
+    const key  = process.argv[2];
+    const sub  = process.argv[3];
+    const val  = JSON.parse(process.argv[4]);
+    let obj = {};
+    try { obj = JSON.parse(fs.readFileSync(file, "utf8")); } catch(e) {}
+    if (!obj[key]) obj[key] = {};
+    if (!obj[key][sub]) {
+      obj[key][sub] = val;
+      fs.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
+      process.exit(0);
+    }
+    process.exit(2); // already present
+  '
+
+  local runner
+  if command -v node &>/dev/null; then
+    runner=node
+  elif command -v bun &>/dev/null; then
+    runner=bun
+  else
+    log_warn "node/bun not found — cannot auto-update $target_file"
+    return 1
+  fi
+
+  local rc=0
+  "$runner" -e "$merge_script" -- "$target_file" "$key" "$subkey" "$value" || rc=$?
+  return $rc
+}
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+clear
+cat <<'BANNER'
+
+  ┌─────────────────────────────────────────────────────────┐
+  │   mlibrary-agentic-scaffold  ·  OpenCode initializer    │
+  └─────────────────────────────────────────────────────────┘
+
+  This script will:
+    • Offer to install recommended MCP servers
+    • Create / merge a project-level opencode.json with MCP config
+    • Back up any existing AGENTS.md and write a scaffold-ready one
+    • Initialize a Loom workspace (.loom/) if none exists
+
+  Nothing is modified without your explicit approval.
+  Every replaced file is backed up before changes are made.
+
+BANNER
+
+echo "  Scaffold : $(dim "$SCAFFOLD_DIR")"
+echo "  Project  : $(dim "$PROJECT_DIR")"
+echo
+
+if ! ask_yn "Continue?" y; then
+  echo "Aborted."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1: MCP Server installs
+# ---------------------------------------------------------------------------
+header "MCP Servers"
+
+cat <<'INFO'
+  OpenCode uses MCP (Model Context Protocol) servers to give the AI agent
+  additional capabilities. The scaffold recommends the following servers.
+
+  You will be asked about each one individually.
+
+INFO
+
+declare -A MCP_APPROVED
+
+# ---------------------------------------------------------------------------
+# Group 1: Web fetching — pick one (or none)
+# ---------------------------------------------------------------------------
+echo "  $(bold "── Web / URL Fetching ──────────────────────────────────────────")"
+echo
+echo "  The agent can fetch web pages and documentation. Two options:"
+echo
+echo "  $(bold "a) context-mode")  $(dim "[recommended]")"
+echo "     Runs every tool call in a subprocess sandbox — only summaries enter"
+echo "     the context window, not raw output. Prevents context overflow on large"
+echo "     pages. Also provides a BM25 full-text index for in-session doc lookup,"
+echo "     and handles URL fetching natively. Replaces 'fetch' entirely."
+echo "     Install: npm install -g context-mode"
+echo "     License: Elastic License v2 — unrestricted for personal/internal use."
+echo
+  echo "  $(bold "b) fetch")"
+  echo "     Simple URL fetcher. Retrieves web pages and returns the raw content"
+  echo "     directly into the context window. No indexing, no overflow protection."
+  echo "     Good enough when pages are small and you don't expect heavy doc work."
+  echo "     Requires: uv  (macOS: brew install uv | Linux: pipx install uv)"
+echo
+echo "  $(bold "c) neither")"
+echo "     The agent will not be able to retrieve external URLs."
+echo
+
+while true; do
+  printf '  Which web fetching option? %s ' "$(dim "[a/b/c, default: a]")"
+  read -r web_choice
+  web_choice="${web_choice:-a}"
+  case "$web_choice" in
+    [Aa]*) WEB_FETCH_CHOICE="context-mode"; break ;;
+    [Bb]*) WEB_FETCH_CHOICE="fetch";         break ;;
+    [Cc]*) WEB_FETCH_CHOICE="none";          break ;;
+    *) echo "  Please enter a, b, or c." ;;
+  esac
+done
+echo
+
+case "$WEB_FETCH_CHOICE" in
+  context-mode)
+    already=false
+    if context-mode --version &>/dev/null 2>&1; then
+      already=true
+      echo "  $(dim "  ✓ context-mode already installed")"
+    fi
+    if $already; then
+      if ask_yn "  Already installed. Add/verify its opencode.json entry?" y; then
+        MCP_APPROVED["context-mode"]="npm install -g context-mode"
+      else
+        log_skip "context-mode"
+      fi
+    else
+      if ask_yn "  Install context-mode now (npm install -g context-mode)?" y; then
+        MCP_APPROVED["context-mode"]="npm install -g context-mode"
+      else
+        log_skip "context-mode (you can install later: npm install -g context-mode)"
+      fi
+    fi
+    ;;
+  fetch)
+    already=false
+    if uvx mcp-server-fetch --help &>/dev/null 2>&1; then
+      already=true
+      echo "  $(dim "  ✓ fetch (via uvx) already available")"
+    fi
+    if $already; then
+      if ask_yn "  Already available. Add/verify its opencode.json entry?" y; then
+        MCP_APPROVED["fetch"]="# uv handles this automatically via uvx"
+      else
+        log_skip "fetch"
+      fi
+    else
+      echo "  $(dim "  fetch uses uvx at runtime — uv must be installed.")"
+      if ! command -v uv &>/dev/null; then
+        echo "  $(dim "  uv not found — attempting to install...")"
+        install_uv || true
+      fi
+      if ask_yn "  Add fetch to opencode.json?" y; then
+        MCP_APPROVED["fetch"]="# uv handles this automatically via uvx"
+      else
+        log_skip "fetch"
+      fi
+    fi
+    ;;
+  none)
+    log_skip "web fetching (no server selected)"
+    ;;
+esac
+echo
+
+# ---------------------------------------------------------------------------
+# Group 2: Cross-session memory — pick one (or none)
+# ---------------------------------------------------------------------------
+echo "  $(bold "── Cross-Session Memory ────────────────────────────────────────")"
+echo
+echo "  The agent can remember things across sessions. Two options:"
+echo
+echo "  $(bold "a) @modelcontextprotocol/server-memory")  $(dim "[simpler]")"
+echo "     Local knowledge graph stored in a JSONL file. No API key, no Docker."
+echo "     Retrieves by entity name — good for structured facts (decisions, names,"
+echo "     project choices). Does not do fuzzy/semantic search."
+echo
+echo "  $(bold "b) mem0")  $(dim "[more powerful, requires API key]")"
+echo "     Vector + graph semantic memory. Retrieves by meaning, not just exact"
+echo "     entity name. Uses the official mem0 cloud service — no local Docker needed."
+echo "     Free tier available at app.mem0.ai (API key required)."
+echo "     Requires: MEM0_API_KEY environment variable."
+echo
+echo "  $(bold "c) neither")"
+echo "     In-session Loom records remain the only persistence. No cross-session recall."
+echo
+
+while true; do
+  printf '  Which memory option? %s ' "$(dim "[a/b/c, default: a]")"
+  read -r mem_choice
+  mem_choice="${mem_choice:-a}"
+  case "$mem_choice" in
+    [Aa]*) MEM_CHOICE="memory"; break ;;
+    [Bb]*) MEM_CHOICE="mem0";   break ;;
+    [Cc]*) MEM_CHOICE="none";   break ;;
+    *) echo "  Please enter a, b, or c." ;;
+  esac
+done
+echo
+
+case "$MEM_CHOICE" in
+  memory)
+    already=false
+    if npx --yes @modelcontextprotocol/server-memory --help &>/dev/null 2>&1; then
+      already=true
+      echo "  $(dim "  ✓ server-memory already available via npx")"
+    fi
+    if $already; then
+      if ask_yn "  Add/verify its opencode.json entry?" y; then
+        MCP_APPROVED["memory"]="npx --yes @modelcontextprotocol/server-memory"
+      else
+        log_skip "memory"
+      fi
+    else
+      if ask_yn "  Add server-memory to opencode.json?" y; then
+        MCP_APPROVED["memory"]="npx --yes @modelcontextprotocol/server-memory"
+      else
+        log_skip "memory"
+      fi
+    fi
+    ;;
+  mem0)
+    echo "  mem0 uses the official cloud service at mcp.mem0.ai."
+    echo "  Get a free API key at: $(dim "https://app.mem0.ai")"
+    echo "  Set MEM0_API_KEY in your shell environment before using OpenCode with mem0."
+    echo
+    if ask_yn "  Add mem0 MCP entry to opencode.json?" y; then
+      MCP_APPROVED["mem0"]="# Docker — see https://docs.mem0.ai/open-source/setup"
+    else
+      log_skip "mem0"
+    fi
+    ;;
+  none)
+    log_skip "cross-session memory (no server selected)"
+    ;;
+esac
+echo
+
+# ---------------------------------------------------------------------------
+# Group 3: Single-choice servers
+# ---------------------------------------------------------------------------
+echo "  $(bold "── Other MCP Servers ───────────────────────────────────────────")"
+echo
+
+# github-mcp-server handled separately (platform-specific install)
+echo "  $(bold "github-mcp-server")"
+echo "    Access GitHub issues, PRs, releases, and repository metadata. Used by release workflows."
+echo "    $(dim "Requires a GITHUB_TOKEN env var.")"
+echo
+
+already=false
+if command -v github-mcp-server &>/dev/null; then
+  already=true
+  echo "  $(dim "  ✓ github-mcp-server already installed")"
+fi
+
+if $already; then
+  if ask_yn "  Already installed. Add/verify its config entry in opencode.json?" y; then
+    MCP_APPROVED["github"]="__github_mcp_server__"
+  else
+    log_skip "github-mcp-server"
+  fi
+else
+  if ask_yn "  Install github-mcp-server?" y; then
+    MCP_APPROVED["github"]="__github_mcp_server__"
+  else
+    log_skip "github-mcp-server (install later: brew install github-mcp-server  or  go install github.com/github/github-mcp-server/cmd/github-mcp-server@latest)"
+  fi
+fi
+echo
+
+declare -a MCP_SERVERS=(
+  "sequential-thinking|npx --yes @modelcontextprotocol/server-sequential-thinking --help|npx --yes @modelcontextprotocol/server-sequential-thinking|Forces the agent to reason step-by-step before acting on complex problems.|Complements Loom's outer-loop discipline. Skip if you want to rely entirely on Loom for structured reasoning."
+  "filesystem|npx --yes @modelcontextprotocol/server-filesystem --help|npx --yes @modelcontextprotocol/server-filesystem <paths>|Lets the agent read files outside the project root — specifically the scaffold's instruction files.|Needed if you want the agent to directly read scaffold files without copying them into the project."
+)
+
+for entry in "${MCP_SERVERS[@]}"; do
+  IFS='|' read -r name check_cmd install_cmd description dependency <<< "$entry"
+
+  echo "  $(bold "$name")"
+  echo "    $description"
+  echo "    $(dim "$dependency")"
+  echo
+
+  already=false
+  if eval "$check_cmd" &>/dev/null 2>&1; then
+    already=true
+    echo "  $(dim "  ✓ already installed")"
+  fi
+
+  if $already; then
+    if ask_yn "  Already installed. Still add/verify its config entry in opencode.json?" y; then
+      MCP_APPROVED[$name]="$install_cmd"
+    else
+      log_skip "$name"
+    fi
+  else
+    if ask_yn "  Install $name?" y; then
+      MCP_APPROVED[$name]="$install_cmd"
+    else
+      log_skip "$name (you can install later)"
+    fi
+  fi
+  echo
+done
+
+# ---------------------------------------------------------------------------
+# Step 2: Run approved installs
+# ---------------------------------------------------------------------------
+if [[ ${#MCP_APPROVED[@]} -gt 0 ]]; then
+  header "Installing MCP Servers"
+
+  for name in "${!MCP_APPROVED[@]}"; do
+    install_cmd="${MCP_APPROVED[$name]}"
+    # Skip entries that are config-only (start with #)
+    if [[ "$install_cmd" == \#* ]]; then
+      log_skip "$name install (managed at runtime: $install_cmd)"
+      continue
+    fi
+    # github-mcp-server uses platform-aware installer
+    if [[ "$install_cmd" == "__github_mcp_server__" ]]; then
+      install_github_mcp_server || true
+      continue
+    fi
+    echo "  Running: $(dim "$install_cmd")"
+    if eval "$install_cmd" &>/dev/null 2>&1; then
+      log_done "$name installed"
+    else
+      log_warn "$name install may have failed — check manually"
+    fi
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: Project-level opencode.json — MCP config entries
+# ---------------------------------------------------------------------------
+header "Project opencode.json (MCP config)"
+
+OPENCODE_JSON="${PROJECT_DIR}/opencode.json"
+
+cat <<INFO
+  OpenCode supports a project-level opencode.json checked into the project root.
+  MCP config entries placed here override the global config for this project.
+  This file is safe to commit to git.
+
+INFO
+
+if [[ -f "$OPENCODE_JSON" ]]; then
+  echo "  Found existing: $(dim "$OPENCODE_JSON")"
+else
+  echo "  No opencode.json found — will create one."
+fi
+
+if ask_yn "  Update $OPENCODE_JSON with approved MCP server entries?" y; then
+  # Initialize file if missing
+  if [[ ! -f "$OPENCODE_JSON" ]]; then
+    echo '{"$schema":"https://opencode.ai/config.json"}' > "$OPENCODE_JSON"
+    log_create "opencode.json"
+  fi
+
+  SCAFFOLD_REL="${SCAFFOLD_DIR}"  # used in filesystem paths
+
+  declare -A MCP_CONFIGS
+  MCP_CONFIGS["context-mode"]='{"type":"local","command":["context-mode"],"enabled":true}'
+  MCP_CONFIGS["fetch"]='{"type":"local","command":["uvx","mcp-server-fetch"],"enabled":true}'  # fallback only
+  MCP_CONFIGS["github"]='{"type":"local","command":["github-mcp-server","stdio"],"environment":{"GITHUB_PERSONAL_ACCESS_TOKEN":"${GITHUB_TOKEN}"},"enabled":true}'
+  MCP_CONFIGS["sequential-thinking"]='{"type":"local","command":["npx","-y","@modelcontextprotocol/server-sequential-thinking"],"enabled":true}'
+  PROJECTS_ROOT="$(dirname "${PROJECT_DIR}")"
+  MCP_CONFIGS["filesystem"]='{"type":"local","command":["npx","-y","@modelcontextprotocol/server-filesystem","'"${PROJECTS_ROOT}"'","'"${SCAFFOLD_REL}"'"],"enabled":true}'
+  MCP_CONFIGS["memory"]='{"type":"local","command":["npx","-y","@modelcontextprotocol/server-memory"],"environment":{"MEMORY_FILE_PATH":"'"${PROJECT_DIR}/memory.jsonl"'"},"enabled":true}'
+  MCP_CONFIGS["mem0"]='{"type":"http","url":"https://mcp.mem0.ai/mcp","headers":{"Authorization":"Bearer ${MEM0_API_KEY}"},"enabled":false}'
+
+  for name in "${!MCP_APPROVED[@]}"; do
+    if [[ -n "${MCP_CONFIGS[$name]:-}" ]]; then
+      rc=0
+      merge_json "$OPENCODE_JSON" "mcp" "$name" "${MCP_CONFIGS[$name]}" || rc=$?
+      if [[ $rc -eq 0 ]]; then
+        log_done "Added $name to opencode.json"
+      elif [[ $rc -eq 2 ]]; then
+        log_skip "$name already in opencode.json — not overwritten"
+      else
+        log_warn "Could not merge $name into opencode.json — add manually"
+      fi
+    fi
+  done
+
+  # Write instructions array so OpenCode auto-loads scaffold instruction files.
+  # Build the list from the requested layers; skip files that don't exist yet.
+  INSTR_FILES=("AGENTS.md")
+  for layer in "${REQUESTED_LAYERS[@]}"; do
+    for rel in ${LAYER_FILES[$layer]}; do
+      abs="${SCAFFOLD_DIR}/${rel}"
+      if [[ -f "$abs" ]]; then
+        INSTR_FILES+=("$abs")
+      fi
+    done
+  done
+
+  # Serialise to JSON array for the Python snippet
+  INSTR_JSON="["
+  for f in "${INSTR_FILES[@]}"; do
+    INSTR_JSON+="\"${f}\","
+  done
+  INSTR_JSON="${INSTR_JSON%,}]"  # strip trailing comma
+
+  if python3 - <<PYEOF 2>/dev/null
+import json, sys
+path = "${OPENCODE_JSON}"
+with open(path) as f:
+    data = json.load(f)
+if "instructions" not in data:
+    data["instructions"] = json.loads('${INSTR_JSON}')
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    sys.exit(0)
+else:
+    sys.exit(2)
+PYEOF
+  then
+    layer_list="$(IFS=, ; echo "${REQUESTED_LAYERS[*]}")"
+    log_done "Added instructions array to opencode.json (layers: ${layer_list})"
+  else
+    log_skip "instructions already in opencode.json — not overwritten"
+  fi
+else
+  echo
+  echo "  Skipped. You can add MCP entries to opencode.json manually."
+  echo "  See: $(dim "$SCAFFOLD_DIR/mcp/recommended-servers.md")"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4: Loom workspace
+# ---------------------------------------------------------------------------
+header "Loom Workspace"
+
+LOOM_DIR="${PROJECT_DIR}/.loom"
+
+cat <<'INFO'
+  Loom is the workflow governance layer used by this scaffold.
+  It tracks decisions, tickets, research, wiki, and more in .loom/
+  using plain Markdown files — no database, no external services.
+
+INFO
+
+# Defined here so it is available whether loom CLI is present or not.
+_create_minimal_loom() {
+  mkdir -p "$LOOM_DIR"/{constitution/decisions,tickets,wiki,research,specs,plans,evidence,critique,packets,memory}
+  cat > "$LOOM_DIR/constitution/constitution.md" <<CONSTITUTION
+---
+id: constitution:main
+kind: constitution
+status: active
+created_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+updated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+scope:
+  kind: repository
+  repositories:
+    - repo:root
+links: {}
+---
+
+# Project Constitution
+
+## Identity
+
+<!-- Describe what this project is -->
+
+## Principles
+
+<!-- List the core principles that guide work here -->
+
+## Constraints
+
+<!-- Hard limits: what agents must never do without explicit approval -->
+
+## Open Questions
+
+<!-- Things that need a decision but haven't been resolved yet -->
+CONSTITUTION
+}
+
+if [[ -d "$LOOM_DIR" ]]; then
+  echo "  $(green "✓") Loom workspace already exists at .loom/"
+  log_skip "Loom init"
+else
+  echo "  No .loom/ directory found."
+  if ask_yn "  Initialize a Loom workspace in this project?" y; then
+    # Check for loom CLI
+    if command -v loom &>/dev/null; then
+      if loom init &>/dev/null 2>&1; then
+        log_done "loom init"
+      else
+        log_warn "loom init failed — creating minimal structure manually"
+        _create_minimal_loom
+        log_done "Created minimal .loom/ structure"
+      fi
+    else
+      echo "  $(dim "loom CLI not found — creating minimal .loom/ structure")"
+      _create_minimal_loom
+      log_done "Created minimal .loom/ structure"
+    fi
+  else
+    log_skip "Loom init"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5: AGENTS.md
+# ---------------------------------------------------------------------------
+header "AGENTS.md"
+
+AGENTS_FILE="${PROJECT_DIR}/AGENTS.md"
+AGENTS_BAK="${PROJECT_DIR}/AGENTS.md.bak"
+
+cat <<'INFO'
+  AGENTS.md is the instruction file that OpenCode (and other AI agents) read
+  at the start of every session. A scaffold-ready AGENTS.md should:
+    • Reference the scaffold's instruction files
+    • Include the Loom bootstrap directive
+    • Preserve any project-specific instructions you already have
+
+INFO
+
+ORIGINAL_AGENTS=""
+HAD_ORIGINAL_AGENTS=false
+if [[ -f "$AGENTS_FILE" ]]; then
+  echo "  Found existing AGENTS.md"
+  echo
+  echo "  $(yellow "Important"):"
+  echo "  The existing file will be backed up to AGENTS.md.bak."
+  echo "  A new AGENTS.md will be written that:"
+  echo "    • Includes the scaffold reference and Loom bootstrap"
+  echo "    • Embeds your original AGENTS.md content in a clearly marked section"
+  echo
+  echo "  $(dim "Tip: After initialization, consider asking your AI agent to review")"
+  echo "  $(dim "AGENTS.md and consolidate any instructions made redundant by the scaffold.")"
+  echo
+
+  if ask_yn "  Back up existing AGENTS.md and write a new scaffold-ready one?" y; then
+    ORIGINAL_AGENTS="$(cat "$AGENTS_FILE")"
+    HAD_ORIGINAL_AGENTS=true
+    cp "$AGENTS_FILE" "$AGENTS_BAK"
+    log_backup "AGENTS.md → AGENTS.md.bak"
+  else
+    log_skip "AGENTS.md (no changes made)"
+    AGENTS_FILE=""  # signal: skip writing
+  fi
+else
+  echo "  No existing AGENTS.md found — will create one."
+  if ! ask_yn "  Create AGENTS.md?" y; then
+    AGENTS_FILE=""
+  fi
+fi
+
+if [[ -n "$AGENTS_FILE" ]]; then
+  SCAFFOLD_REL_FROM_PROJECT="$(python3 -c "import os; print(os.path.relpath('${SCAFFOLD_DIR}', '${PROJECT_DIR}'))" 2>/dev/null || echo "${SCAFFOLD_DIR}")"
+
+  {
+    cat <<HEADER
+# Agent Instructions
+
+## Scaffold
+
+This project uses [mlibrary-agentic-scaffold](${SCAFFOLD_REL_FROM_PROJECT}) with OpenCode.
+
+Key instruction files loaded via \`opencode.json\` (these are read automatically each session):
+
+- [Core conventions](${SCAFFOLD_DIR}/instructions/core.md)
+- [Agentic memory](${SCAFFOLD_DIR}/instructions/agentic-memory.md)
+- [MCP servers](${SCAFFOLD_DIR}/mcp/recommended-servers.md)
+
+These files are loaded automatically via the \`instructions\` array in \`opencode.json\`
+(if set up by this script). Language-specific files are loaded only for the relevant stack.
+
+## Loom
+
+This project uses [Loom](https://github.com/anomalyco/open-loom).
+Load the \`loom-bootstrap\` skill before any work.
+
+Before non-trivial edits: check \`.loom/tickets/\` for existing work, create a ticket
+if none exists.
+
+Active tickets: \`rg -l 'status: active' .loom/tickets/\`
+Constitution:   \`.loom/constitution/constitution.md\`
+
+## What Agents Must NOT Do Without Explicit Approval
+
+- Bump the major version of any library.
+- Publish to RubyGems.org, Maven Central, or GitHub Packages.
+- Push to \`main\`.
+- Delete branches.
+- Modify \`.github/workflows/\` without explaining the change.
+- Add new runtime dependencies without proposing alternatives.
+
+HEADER
+
+    if [[ -n "$ORIGINAL_AGENTS" ]]; then
+      cat <<PRESERVED
+
+---
+
+## Preserved from Original AGENTS.md
+
+<!-- The content below was in your AGENTS.md before initialization.          -->
+<!-- Review this section: some instructions may be redundant now that the     -->
+<!-- scaffold is in use. Ask your AI agent to consolidate if appropriate.     -->
+
+${ORIGINAL_AGENTS}
+PRESERVED
+    fi
+  } > "$AGENTS_FILE"
+
+  log_done "AGENTS.md written"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5b: Skills — symlink scaffold skills into global OpenCode skills dir
+# ---------------------------------------------------------------------------
+header "Skills"
+
+OPENCODE_SKILLS_DIR="${HOME}/.config/opencode/skills"
+SCAFFOLD_SKILLS_DIR="${SCAFFOLD_DIR}/skills"
+SKILLS_INSTALLED=0
+SKILLS_SKIPPED=0
+
+cat <<'INFO'
+  Scaffold skills will be symlinked into ~/.config/opencode/skills/ so OpenCode
+  can load them. Symlinks mean updates to existing skill files take effect
+  automatically. New skills added to the scaffold will need a re-run of
+  bin/update_mlibrary_scaffold (or this script).
+
+INFO
+
+mkdir -p "$OPENCODE_SKILLS_DIR"
+
+for skill_dir in "${SCAFFOLD_SKILLS_DIR}"/*/; do
+  skill_name="$(basename "$skill_dir")"
+  target="${OPENCODE_SKILLS_DIR}/${skill_name}"
+
+  if [[ -L "$target" ]]; then
+    # Already a symlink — update it
+    ln -sf "$skill_dir" "$target"
+    log_done "Skills: ${skill_name} (updated symlink)"
+    (( SKILLS_INSTALLED++ )) || true
+  elif [[ -e "$target" ]]; then
+    log_skip "Skills: ${skill_name} (exists as non-symlink — skipping to avoid overwrite)"
+    (( SKILLS_SKIPPED++ )) || true
+  else
+    ln -sf "$skill_dir" "$target"
+    log_done "Skills: ${skill_name}"
+    (( SKILLS_INSTALLED++ )) || true
+  fi
+done
+
+if (( SKILLS_SKIPPED > 0 )); then
+  echo
+  echo "  $(yellow "Warning"): ${SKILLS_SKIPPED} skill(s) were skipped because a non-symlink"
+  echo "  directory already exists at ~/.config/opencode/skills/<name>."
+  echo "  Remove or rename the conflicting directories manually if you want the scaffold version."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 6: Summary
+# ---------------------------------------------------------------------------
+header "Summary"
+
+echo "  Project initialized at: $(dim "$PROJECT_DIR")"
+echo
+  echo "  Files changed:"
+  [[ -f "${PROJECT_DIR}/opencode.json" ]]  && echo "    $(green "✓") opencode.json  (MCP config)"
+  [[ -f "$LOOM_DIR/constitution/constitution.md" ]] && echo "    $(green "✓") .loom/  (Loom workspace)"
+  [[ -f "${PROJECT_DIR}/AGENTS.md" ]]      && echo "    $(green "✓") AGENTS.md  (scaffold-ready)"
+  [[ -f "$AGENTS_BAK" ]]                   && echo "    $(yellow "~") AGENTS.md.bak  (original preserved)"
+  (( SKILLS_INSTALLED > 0 )) && echo "    $(green "✓") ${SKILLS_INSTALLED} skill(s) symlinked → ~/.config/opencode/skills/"
+echo
+echo "  Recommended next steps:"
+echo
+echo "  1. Edit .loom/constitution/constitution.md — describe what this project"
+echo "     is, its principles, and any hard constraints for agents."
+echo
+echo "  2. Review AGENTS.md — the scaffold reference and Loom directive are wired"
+echo "     in. If you preserved a previous AGENTS.md, ask your agent to consolidate"
+echo "     the 'Preserved from Original' section once the scaffold is familiar."
+echo
+echo "  3. If you approved the 'github' MCP server, add GITHUB_TOKEN to your"
+echo "     shell environment (e.g., in ~/.zshrc or ~/.bashrc):"
+echo "       $(dim "export GITHUB_TOKEN=ghp_...")"
+echo
+echo "  4. Open OpenCode in this project and run a quick sanity check:"
+echo "       $(dim "opencode")"
+echo "     The agent should load AGENTS.md and the Loom bootstrap automatically."
+echo
+  echo "  Scaffold docs: $(dim "$SCAFFOLD_DIR/README.md")"
+echo "  MCP reference: $(dim "$SCAFFOLD_DIR/mcp/recommended-servers.md")"
+echo
+
+# ---------------------------------------------------------------------------
+# Optional: cleanup prompt for projects that had an existing AGENTS.md
+# ---------------------------------------------------------------------------
+if $HAD_ORIGINAL_AGENTS; then
+  cat <<'CLEANUP'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  AGENTS.md Cleanup (optional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Your original AGENTS.md content is preserved in the
+  "Preserved from Original" section at the bottom of AGENTS.md.
+
+  Once you've verified the scaffold is working, you can ask your
+  agent to clean up that section. Copy and paste this prompt:
+
+  ┌──────────────────────────────────────────────────────────────┐
+
+  Review the "Preserved from Original AGENTS.md" section at the
+  bottom of AGENTS.md. Compare it to the scaffold rules already
+  loaded (the Scaffold and Loom sections above it, plus any
+  instruction files they reference).
+
+  For each item in the preserved section:
+  - If it is fully covered by the scaffold: mark it for removal.
+  - If it contradicts the scaffold: flag it explicitly and ask me
+    which version should win before removing either.
+  - If it adds project-specific context the scaffold doesn't
+    cover: keep it and move it to an appropriate section above.
+
+  Do NOT make any changes yet. Show me a summary of what you
+  found — redundant, contradictory, and unique — and wait for
+  my approval before editing the file.
+
+  └──────────────────────────────────────────────────────────────┘
+
+CLEANUP
+fi
